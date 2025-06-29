@@ -1,4 +1,5 @@
 import time
+
 # Individual test implementations
 
 def change_temperature_to_25(callback, full_test_name, selected_units, unit_index):
@@ -52,7 +53,7 @@ def switch_setup_unit(callback, new_unit_number):
 
 def connect_load(callback, full_test_name, selected_units, unit_index):
     # Send commands to update temperature
-    print("load connected")
+    print("load connected for unit number ", unit_index, " out of units ", selected_units)
 
 def callibration_passed_test(callback, full_test_name, selected_units, unit_index):
     callback({
@@ -73,7 +74,7 @@ def callibration_passed_test(callback, full_test_name, selected_units, unit_inde
         'result type': 'boolean',
         'expected range': (True,),
         'result': status,
-        'pass': 'true'
+        'pass': 'false'
     })
     callback({
         'test name': full_test_name,
@@ -82,8 +83,9 @@ def callibration_passed_test(callback, full_test_name, selected_units, unit_inde
         'result type': 'boolean',
         'expected range': (True,),
         'result': status,
-        'pass': 'true'
+        'pass': 'false'
     })
+    print("calibration passed test function end")
 
 
 def output_power_test(callback, full_test_name, selected_units, unit_index):
@@ -171,6 +173,21 @@ def load_test_B(callback, full_test_name, selected_units, unit_index):
         'test name': full_test_name, 'message type': 'test end', 'unit index': unit_index, 'result type': 'number', 'expected range': (1,2), 'result': measured, 'pass': 'true'
     })
 
+
+def test_image(callback, full_test_name, selected_units, unit_index):
+    callback({
+        'test name': full_test_name, 'message type': 'new test', 'unit index': unit_index, 'result type': 'image', 'expected range': None, 'result unit': None, 'result': None, 'pass': 'in progress'
+    })
+    time.sleep(0.2)
+    img_url = "http://localhost:5000/images/flower.jpg"
+    callback({
+        'test name': full_test_name, 'message type': 'update', 'unit index': unit_index, 'result type': 'image', 'expected range': None, 'result unit': None, 'result': img_url, 'pass': 'in progress'
+    })
+    callback({
+        'test name': full_test_name, 'message type': 'test end', 'unit index': unit_index, 'result type': 'image', 'expected range': None, 'result unit': None, 'result': img_url, 'pass': 'true'
+    })
+
+
 # how many units this script supports
 MULTI_UNIT_SUPPORTED_NUMBER = 4
 # Full AVAILABLE_TESTS declaration
@@ -178,7 +195,8 @@ AVAILABLE_TESTS = {
     'Temp_25': {'funcs': [change_temperature_to_25], 'exec_order': -1,
                              'Input_Voltage': {'funcs':[input_voltage_test], 'exec_order': 1},
                              'Output_Power_By_Freq': {'funcs':[output_power_test], 'exec_order': 1},
-                             'Calibration': {'funcs':[callibration_passed_test], 'exec_order': 1},
+                             'Image_Test': {'funcs':[test_image], 'exec_order': 1},
+                             'Calibration': {'funcs': [callibration_passed_test], 'exec_order': 1},
                              'Under_Load': {'funcs':[connect_load], 'exec_order': 1,
                                                   'Test_A':{'funcs':[load_test_A], 'exec_order': 1},
                                                   'Test_B':{'funcs':[load_test_B], 'exec_order': 1}}},

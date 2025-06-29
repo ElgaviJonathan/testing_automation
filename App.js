@@ -1,10 +1,11 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import io from "socket.io-client";
 import {
   Container,
   Typography,
   FormControl,
   InputLabel,
+  FormControlLabel,
   Select,
   MenuItem,
   Button,
@@ -237,7 +238,7 @@ export default function App() {
   const [scripts, setScripts] = useState([]);
   const [selectedScript, setSelectedScript] = useState("");
   const [multiUnitSupported, setMultiUnitSupported] = useState(1);
-  const [unitCount, setUnitCount] = useState(1);
+  const [selectedUnits, setSelectedUnits] = useState([]);
 
   const [treeItems, setTreeItems] = useState([]);
   const [selectedTests, setSelectedTests] = useState({});
@@ -254,8 +255,11 @@ export default function App() {
   const [serials, setSerials] = useState([""]);
   const [comments, setComments] = useState([""]);
   const [operatorName, setOperatorName] = useState("");
-
-
+  // state & ref for historical results
+  const fileInputRef = useRef(null);
+  const [pastMetadata, setPastMetadata] = useState(null);
+  const [pastResults,  setPastResults]  = useState(null);
+  
 
   // Fetch scripts & subscribe
   useEffect(() => {
@@ -330,7 +334,10 @@ export default function App() {
     // assume script_tests now returns { tests: {...}, multiUnitSupportedNumber: N }
     const { tests, multiUnitSupportedNumber } = data;
     setMultiUnitSupported(multiUnitSupportedNumber || 1);
-    setUnitCount(1);
+    // default: enable all units [1…N]
+    setSelectedUnits(
+      Array.from({ length: multiUnitSupportedNumber }, (_, i) => i + 1)
+    );
 
     const items = convertTestsToItems(tests);
     setTreeItems(items);
@@ -352,17 +359,16 @@ export default function App() {
     setComments(Array(1).fill(""));
   };
 
-  // When unitCount changes, resize the details arrays & reset results
   useEffect(() => {
     setSerials((prev) =>
-      Array.from({ length: unitCount }, (_, i) => prev[i] || "")
+      Array.from({ length: selectedUnits.length }, (_, i) => prev[i] || "")
     );
     setComments((prev) =>
-      Array.from({ length: unitCount }, (_, i) => prev[i] || "")
+      Array.from({ length: selectedUnits.length }, (_, i) => prev[i] || "")
     );
     setTestResults({});
     setTabIndex(0);
-  }, [unitCount]);
+  }, [selectedUnits]);
 
   const handleToggle = (id) => {
     setSelectedTests((prev) => {
@@ -394,13 +400,41 @@ export default function App() {
           comments,
           operatorName,
         },
-        unitCount,
+        selectedUnitNumbers: selectedUnits,
       }),
     });
     setTestRunning(true);
     setAllComplete(false);
   };
   const stopTest = async () => { await fetch("http://localhost:5000/stop", { method: 'POST' }); setTestRunning(false); };
+
+  // Open OS file dialog
+  const handleViewResults = () => {
+    if (fileInputRef.current) {
+      fileInputRef.current.value = null;
+      fileInputRef.current.click();
+    }
+  };
+
+  // When user picks a file, upload & parse
+  const handleFileChange = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const form = new FormData();
+    form.append("file", file);
+    const res = await fetch("http://localhost:5000/results/upload", {
+      method: "POST",
+      body: form
+    });
+    if (!res.ok) {
+      console.error("Failed to load results", await res.text());
+      return;
+    }
+    const { metadata, results } = await res.json();
+    setPastMetadata(metadata);
+    setPastResults(results);
+  };
+
 
   return (
     <Container sx={{ mt: 4 }}>
@@ -421,43 +455,55 @@ export default function App() {
         <Typography variant="h4" align="center">
           Select & Load Tests
         </Typography>
-        <Box sx={{ display: "flex", gap: 2, mt: 2 }}>
-          <FormControl fullWidth>
-            <InputLabel>Script</InputLabel>
-            <Select
-              value={selectedScript}
-              onChange={(e) => setSelectedScript(e.target.value)}
-              disabled={testRunning}
-            >
-              <MenuItem value="">
-                <em>None</em>
+        {/* Script selector */}
+        <FormControl fullWidth sx={{ mt: 2 }}>
+          <InputLabel>Script</InputLabel>
+          <Select
+            value={selectedScript}
+            onChange={(e) => setSelectedScript(e.target.value)}
+            disabled={testRunning}
+          >
+            <MenuItem value="">
+              <em>None</em>
+            </MenuItem>
+            {scripts.map((s) => (
+              <MenuItem key={s} value={s}>
+                {s}
               </MenuItem>
-              {scripts.map((s) => (
-                <MenuItem key={s} value={s}>
-                  {s}
-                </MenuItem>
+            ))}
+          </Select>
+        </FormControl>
+
+        {/* Unit checkboxes, underneath the script dropdown */}
+        {multiUnitSupported > 1 && (
+          <Box sx={{ mt: 2 }}>
+            <Typography variant="subtitle1">Enable Units</Typography>
+            <FormControl component="fieldset" sx={{ display: "flex", flexWrap: "wrap", gap: 1, mt: 1 }}>
+              {Array.from({ length: multiUnitSupported }, (_, i) => i + 1).map((n) => (
+                <FormControlLabel
+                  key={n}
+                  control={
+                    <Checkbox
+                      checked={selectedUnits.includes(n)}
+                      onChange={() =>
+                        setSelectedUnits((prev) =>
+                          prev.includes(n)
+                            ? prev.filter((u) => u !== n)
+                            : [...prev, n].sort((a, b) => a - b)
+                        )
+                      }
+                      disabled={testRunning}
+                    />
+                  }
+                  label={`Unit ${n}`}
+                />
               ))}
-            </Select>
-          </FormControl>
+            </FormControl>
+          </Box>
+        )}
 
-          {/* NEW: number of units */}
-          <FormControl sx={{ width: 200 }}>
-            <InputLabel>Units</InputLabel>
-            <Select
-              value={unitCount}
-              onChange={(e) => setUnitCount(e.target.value)}
-              disabled={testRunning}
-            >
-              {Array.from({ length: multiUnitSupported }, (_, i) => i + 1).map(
-                (n) => (
-                  <MenuItem key={n} value={n}>
-                    {n}
-                  </MenuItem>
-                )
-              )}
-            </Select>
-          </FormControl>
-
+        {/* Action buttons below the checkboxes */}
+        <Box sx={{ display: "flex", gap: 2, mt: 2 }}>
           <Button
             variant="contained"
             onClick={loadTests}
@@ -465,47 +511,212 @@ export default function App() {
           >
             Load Tests
           </Button>
+
+          <Button
+            variant="outlined"
+            onClick={handleViewResults}
+            disabled={testRunning}
+          >
+            View Results
+          </Button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".xlsx"
+            style={{ display: "none" }}
+            onChange={handleFileChange}
+          />
         </Box>
       </Paper>
+        {/* ——— Historical Results Display ——— */}
+       {pastResults && (
+         <Paper sx={{ p: 3, mt: 3 }}>
+           <Typography variant="h4" align="center" gutterBottom>
+             Historical Results
+           </Typography>
+           <Box sx={{ mb: 2 }}>
+             <Typography>Script: {pastMetadata["script name"]}</Typography>
+             <Typography>Operator: {pastMetadata.operatorName}</Typography>
+             <Typography>Timestamp: {pastMetadata.timestamp}</Typography>
+             <Typography>Unit: {pastMetadata.unitIndex}</Typography>
+             <Typography>Serial: {pastMetadata.serial}</Typography>
+             <Typography>Comments: {pastMetadata.comments}</Typography>
+           </Box>
+        
+           {/* Render each result using your existing components */}
+           {pastResults.map((r, i) => {
+            // Only render vector tests on their 'test end' events
+            if (r["result type"] === "vector" && r["message type"] !== "test end") {
+              return null;
+            }
+
+            // Background tint based on pass/fail
+            const bgColor =
+              r.pass === true || r.pass === "true"
+                ? "rgba(200,255,200,0.5)"
+                : r.pass === false || r.pass === "false"
+                ? "rgba(255,200,200,0.5)"
+                : "transparent";
+
+            return (
+              <Box
+                key={i}
+                sx={{
+                  mb: 2,
+                  p: 2,
+                  border: "1px solid #ccc",
+                  borderRadius: 1,
+                  backgroundColor: bgColor,
+                }}
+              >
+                {/* Test name */}
+                <Typography variant="h6">{r["test name"]}</Typography>
+
+                {/* Boolean */}
+                {r["result type"] === "boolean" && (
+                  <Typography>Status: {String(r.pass)}</Typography>
+                )}
+
+                {/* Number */}
+                {r["result type"] === "number" && (
+                  <>
+                    <NumberLine
+                      value={r.result}
+                      expectedRange={r["expected range"]}
+                    />
+                    <Typography>
+                       Value: {r.result} [{r["result unit"]}]; pass = {String(r.pass)}
+                    </Typography>
+                  </>
+                )}
+
+                {/* Vector */}
+                {r["result type"] === "vector" && (
+                  (() => {
+                    // only render once, on the 'test end' event
+                    if (r["message type"] !== "test end") return null;
+
+                    // pull out axis labels and expected range
+                    const [xLabel = "", yLabel = ""] = r["result unit"] || [];
+                    const [min = 0, max = 0] = r["expected range"] || [];
+
+                    // gather just the update points
+                    const chartData = pastResults
+                      .filter(
+                        (ev) =>
+                          ev["result type"] === "vector" &&
+                          ev["test name"] === r["test name"] &&
+                          ev["message type"] === "update" &&
+                          Array.isArray(ev.result)
+                      )
+                      .map((ev) => ({
+                        x: ev.result[0],
+                        y: ev.result[1],
+                      }));
+
+                    return (
+                      <>
+                        <Box sx={{ width: "100%", height: 200, my: 2 }}>
+                          <ResponsiveContainer width="100%" height="100%">
+                            <LineChart
+                              data={chartData}
+                              margin={{ top: 20, right: 30, left: 20, bottom: 20 }}
+                            >
+                              <CartesianGrid strokeDasharray="3 3" />
+                              <XAxis
+                                dataKey="x"
+                                label={{
+                                  value: xLabel,
+                                  position: "insideBottomRight",
+                                  offset: -10,
+                                }}
+                              />
+                              <YAxis
+                                domain={[min, max]}
+                                label={{
+                                  value: yLabel,
+                                  angle: -90,
+                                  position: "insideLeft",
+                                }}
+                              />
+                              <ReferenceArea
+                                y1={min}
+                                y2={max}
+                                fill="blue"
+                                fillOpacity={0.2}
+                              />
+                              <Line
+                                type="monotone"
+                                dataKey="y"
+                                stroke="#8884d8"
+                                dot={false}
+                                isAnimationActive={false}
+                              />
+                              <Tooltip />
+                            </LineChart>
+                          </ResponsiveContainer>
+                        </Box>
+                        <Typography>pass = {String(r.pass)}</Typography>
+                      </>
+                    );
+                  })()
+                )}
+
+                {/* Image */}
+                {r["result type"] === "image" && (
+                  <>
+                    <img
+                      src={r.result}
+                      alt={r["test name"]}
+                      style={{ maxWidth: "100%" }}
+                    />
+                    <Typography>pass = {String(r.pass)}</Typography>
+                  </>
+                )}
+              </Box>
+            );
+          })}
+         </Paper>
+       )}
 
       {/* --- Details per unit --- */}
       <Paper sx={{ p: 3, mb: 3 }}>
         <Typography variant="h5" gutterBottom>
           Details
         </Typography>
-        <Box sx={{ display: "flex", flexWrap: "wrap", gap: 2 }}>
-          {Array.from({ length: unitCount }, (_, i) => (
+        <Box sx={{ display: "flex", flexDirection: "column", gap: 2 }}>
+          {selectedUnits.map((unit, idx) => (
             <TextField
-              key={`serial-${i}`}
-              label={`Serial # unit ${i + 1}`}
-              value={serials[i]}
+              key={`serial-${idx}`}
+              label={`Serial # unit ${unit}`}
+              value={serials[idx] || ""}
               onChange={(e) =>
                 setSerials((prev) => {
                   const next = [...prev];
-                  next[i] = e.target.value;
+                  next[idx] = e.target.value;
                   return next;
                 })
               }
               disabled={testRunning}
-              sx={{ flex: "1 1 200px" }}
+              fullWidth
             />
           ))}
-          {Array.from({ length: unitCount }, (_, i) => (
+          {selectedUnits.map((unit, idx) => (
             <TextField
-              key={`comments-${i}`}
-              label={`Comments unit ${i + 1}`}
-              value={comments[i]}
+              key={`comments-${idx}`}
+              label={`Comments unit ${unit}`}
+              value={comments[idx] || ""}
               onChange={(e) =>
                 setComments((prev) => {
                   const next = [...prev];
-                  next[i] = e.target.value;
+                  next[idx] = e.target.value;
                   return next;
                 })
               }
               disabled={testRunning}
               multiline
               rows={2}
-              sx={{ flex: "1 1 200px" }}
+              fullWidth
             />
           ))}
 
@@ -538,7 +749,7 @@ export default function App() {
             variant="contained"
             color={testRunning ? 'secondary' : 'primary'}
             onClick={testRunning ? stopTest : startOrResume}
-            disabled={!treeItems.length || !selectedScript}
+            disabled={!treeItems.length || !selectedScript || selectedUnits.length === 0}
           >
             {testRunning ? 'Stop Test' : 'Start Test'}
           </Button>
@@ -550,24 +761,25 @@ export default function App() {
         <Typography variant="h5" gutterBottom>
           Results
         </Typography>
-        {unitCount > 1 && (
-          <Tabs
-            value={tabIndex}
-            onChange={(_, v) => setTabIndex(v)}
-            sx={{ mb: 2 }}
-          >
-            {Array.from({ length: unitCount }, (_, i) => (
-              <Tab
-                key={i}
-                label={`Unit ${i + 1}`}
-                {...a11yProps(i)}
-                sx={
-                  activeUnit === i + 1
-                    ? { fontWeight: "bold", color: "primary.main" }
-                    : {}
-                }
-              />))}
-          </Tabs>
+        {(
+        <Tabs
+          value={tabIndex}
+          onChange={(_, v) => setTabIndex(v)}
+          sx={{ mb: 2 }}
+        >
+          {selectedUnits.map((unit, idx) => (
+            <Tab
+              key={idx}
+              label={`Unit ${unit}`}
+              {...a11yProps(idx)}
+              sx={
+                activeUnit === unit
+                  ? { fontWeight: "bold", color: "primary.main" }
+                  : {}
+              }
+            />
+          ))}
+        </Tabs>
         )}
         {allComplete && (
           <Box sx={{ my: 1, textAlign: "center" }}>
@@ -577,18 +789,17 @@ export default function App() {
           </Box>
         )}
 
-        {Array.from({ length: unitCount }, (_, i) => {
-          const unit = i + 1;
+        {selectedUnits.map((unit, idx) => {
           const resultsForUnit = testResults[unit] || {};
           return (
             <div
               role="tabpanel"
-              hidden={tabIndex !== i}
-              key={`panel-${i}`}
-              id={`unit-tabpanel-${i}`}
-              aria-labelledby={`unit-tab-${i}`}
+              hidden={tabIndex !== idx}
+              key={`panel-${idx}`}
+              id={`unit-tabpanel-${idx}`}
+              aria-labelledby={`unit-tab-${idx}`}
             >
-              {tabIndex === i && (
+              {tabIndex === idx && (
                 Object.values(resultsForUnit).length === 0 ? (
                   <Typography>No results yet for unit {unit}.</Typography>
                 ) : (
