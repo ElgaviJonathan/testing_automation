@@ -19,6 +19,7 @@ class TestManager:
         self.details = {}
         self.script_name = ""
         self.selected_units = []
+        self.run_timestamp = None
 
     def get_tests(self, script_name):
         script_path = os.path.join(SCRIPTS_DIR, f"{script_name}.py")
@@ -61,6 +62,46 @@ class TestManager:
         self.details = details
         self.script_name = script_name
         self.selected_units = selected_units
+
+        self.run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        os.makedirs("results", exist_ok=True)
+
+        # Pre-create a file per enabled unit with a Details sheet (if missing)
+        serials = self.details.get("serials", [])
+        comments = self.details.get("comments", [])
+        op = (self.details.get("operatorName") or "").strip() or "Tester"
+
+        for unit_idx in sorted(self.selected_units):
+            # map unit_idx → index in details arrays
+            serial = ""
+            comment = ""
+            if unit_idx in self.selected_units:
+                di = self.selected_units.index(unit_idx)
+                if di < len(serials):
+                    serial = (str(serials[di]).strip() or "88888888")
+                else:
+                    serial = "88888888"
+                if di < len(comments):
+                    comment = (comments[di] or "No comment")
+                else:
+                    comment = "No comment"
+            else:
+                serial = "88888888"
+                comment = "No comment"
+
+            fn = f"{self.script_name}_{serial}_{self.run_timestamp}_{op}_unit{unit_idx}.xlsx"
+            out_path = os.path.join("results", fn)
+            if not os.path.exists(out_path):
+                with pd.ExcelWriter(out_path, engine="openpyxl", mode="w") as writer:
+                    info = {
+                        "Script Name": self.script_name,
+                        "Device Serial No.": serial,
+                        "Operator Name": op or "Tester",
+                        "Date/Time": datetime.now().isoformat(sep=" "),
+                        "Additional Comments": comment or "No comment",
+                        "Unit Index": unit_idx,
+                    }
+                    pd.DataFrame([info]).to_excel(writer, sheet_name="Details", index=False)
 
         # 1) Dynamically load the test script module
         script_path = os.path.join(SCRIPTS_DIR, f"{script_name}.py")
@@ -108,6 +149,11 @@ class TestManager:
         def report_callback(result):
             self.socketio.emit("test_update", result)
             self.test_data.append(result)
+            if result.get("message type") == "test end":
+                self.save_results(
+                    unit_idx=result.get("unit index"),
+                    test_name=result.get("test name")
+                )
 
         # 8) Determine max positive exec_order
         max_exec = max((o for o in exec_order_map.values() if o > 0), default=0)
@@ -169,154 +215,172 @@ class TestManager:
         self.save_results()
         self.running = False
 
-
-    def save_results(self):
-        """Save test results into separate Excel files per unit_index."""
+    def save_results(self, unit_idx: int | None = None, test_name: str | None = None) -> None:
+        """
+        Persist results to Excel.
+        - If unit_idx and test_name are provided: append/replace only that test's sheet in that unit's file.
+        - Otherwise (legacy): write everything currently in self.test_data.
+        The workbook filename uses the per-run timestamp (self.run_timestamp).
+        """
         os.makedirs("results", exist_ok=True)
 
-        # Build common filename prefix
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        op = self.details.get("operatorName", "").strip()
+        ts = self.run_timestamp or datetime.now().strftime("%Y%m%d_%H%M%S")
+        operator = (self.details.get("operatorName") or "").strip() or "Tester"
+        serials = self.details.get("serials", []) or []
+        comments = self.details.get("comments", []) or []
 
-        # pull the arrays out of details
-        serials = self.details.get("serials", [])
-        comments = self.details.get("comments", [])
-
-        # Group all callbacks by unit_index
-        by_unit = defaultdict(list)
+        # Group all collected events by unit index
+        by_unit: dict[int, list[dict]] = defaultdict(list)
         for entry in self.test_data:
-            unit = entry.get("unit index", 0)
-            if not unit:
-                # no unit_index or zero ⇒ ignore
+            u = entry.get("unit index", 0)
+            if u:
+                by_unit[u].append(entry)
+
+        # Decide which units to write
+        unit_items = by_unit.items() if unit_idx is None else [(unit_idx, by_unit.get(unit_idx, []))]
+
+        for u_idx, entries in unit_items:
+            if not entries:
                 continue
-            by_unit[unit].append(entry)
 
-        # For each unit, write its own results file
-        for unit_idx, entries in by_unit.items():
+            # Map enabled unit number -> index in details arrays, then pull serial/comment with defaults
+            serial = "88888888"
+            comment = "No comment"
+            if u_idx in self.selected_units:
+                di = self.selected_units.index(u_idx)
+                if di < len(serials) and str(serials[di]).strip():
+                    serial = str(serials[di]).strip()
+                if di < len(comments) and (comments[di] or "").strip():
+                    comment = comments[di]
 
-            serial = ""
-            comment = ""
-            if unit_idx in self.selected_units:
-                idx = self.selected_units.index(unit_idx)
-                if idx < len(serials):
-                    serial = str(serials[idx]).strip()
-                if idx < len(comments):
-                    comment = comments[idx]
-
-            # sanitize unit index (in case 0 means "no unit" or similar)
-            fn = f"{self.script_name}_{serial}_{ts}_{op}_unit{unit_idx}.xlsx"
+            # Build file name and ensure a Details sheet exists
+            fn = f"{self.script_name}_{serial}_{ts}_{operator}_unit{u_idx}.xlsx"
             out_path = os.path.join("results", fn)
 
+            if not os.path.exists(out_path):
+                with pd.ExcelWriter(out_path, engine="openpyxl", mode="w") as w0:
+                    info_row = [{
+                        "Script Name": self.script_name,
+                        "Device Serial No.": serial,
+                        "Operator Name": operator,
+                        "Date/Time": datetime.now().isoformat(sep=" "),
+                        "Additional Comments": comment or "No comment",
+                        "Unit Index": u_idx,
+                    }]
+                    pd.DataFrame(info_row).to_excel(w0, sheet_name="Details", index=False)
 
-            with pd.ExcelWriter(out_path, engine="openpyxl", mode="w") as writer:
-                # 1) DETAILS sheet
-                info = {
-                    "Script Name": self.script_name,
-                    "Device Serial No.": serial,
-                    "Operator Name": op,
-                    "Date/Time": datetime.now().isoformat(sep=" "),
-                    "Additional Comments": comment,
-                    "Unit Index": unit_idx,
-                }
-                pd.DataFrame([info]).to_excel(writer, sheet_name="Details", index=False)
+            # Group this unit's entries by test name (optionally filter to one test)
+            tests = defaultdict(list)
+            for e in entries:
+                tests[e["test name"]].append(e)
+            if test_name is not None:
+                tests = {test_name: tests.get(test_name, [])}
 
-                # 2) Group this unit's entries by test name
-                tests = defaultdict(list)
-                for e in entries:
-                    tests[e["test name"]].append(e)
+            # Append/replace sheets as needed
+            with pd.ExcelWriter(out_path, engine="openpyxl", mode="a", if_sheet_exists="replace") as writer:
+                for tname, evts in tests.items():
+                    if not evts:
+                        continue
 
-                # 3) For each test, reproduce your Boolean/Number/Vector logic
-                for test_name, evts in tests.items():
-                    # sanitize sheet name
-                    sheet = test_name[:31]
+                    # Sheet name (Excel-safe)
+                    sheet = tname[:31]
                     for ch in r'[]:?*\/':
                         sheet = sheet.replace(ch, "_")
 
-                    rtype = evts[0].get("result type", "").lower()
+                    rtype = (evts[0].get("result type") or "").lower()
 
                     if rtype == "boolean":
+                        # final state row: test name, result type, result (pass/fail)
                         end = next((e for e in evts if e["message type"] == "test end"), evts[-1])
                         df = pd.DataFrame([{
-                            "test name": test_name,
-                            "result type": end["result type"],
-                            "result": end["pass"],
+                            "test name": tname,
+                            "result type": end.get("result type"),
+                            "result": end.get("pass"),
                         }])
                         df.to_excel(writer, sheet_name=sheet, index=False)
+
                     elif rtype == "number":
+                        # single summary row with unit, expected range, final value, pass
                         new = next((e for e in evts if e["message type"] == "new test"), evts[0])
                         end = next((e for e in evts if e["message type"] == "test end"), evts[-1])
                         df = pd.DataFrame([{
-                            "test name": test_name,
-                            "result type": end["result type"],
+                            "test name": tname,
+                            "result type": end.get("result type"),
                             "result unit": new.get("result unit"),
-                            "expected range": new["expected range"],
-                            "result value": end["result"],
-                            "pass": end["pass"],
-                        }])
+                            "expected range": new.get("expected range"),
+                            "result value": end.get("result"),
+                            "pass": end.get("pass"),
+                        }], columns=[
+                            "test name", "result type", "result unit",
+                            "expected range", "result value", "pass"
+                        ])
                         df.to_excel(writer, sheet_name=sheet, index=False)
+
                     elif rtype == "vector":
-                        # -- New: write metadata only on the first data row --
+                        # rows: (metadata only on first row) + x,y for each update
                         new = next((e for e in evts if e["message type"] == "new test"), evts[0])
                         end = next((e for e in evts if e["message type"] == "test end"), evts[-1])
 
-                        # Gather only the update events for this test
                         updates = [
                             u for u in evts
-                            if u["message type"] == "update"
-                            and isinstance(u.get("result"), (list, tuple))
-                            and len(u["result"]) >= 2
+                            if u.get("message type") == "update"
+                               and isinstance(u.get("result"), (list, tuple))
+                               and len(u.get("result")) >= 2
                         ]
 
                         rows = []
-                        for idx, u in enumerate(updates):
+                        for i, u in enumerate(updates):
                             x_val, y_val = u["result"]
                             rows.append({
-                                # metadata only for first row (idx==0), else blank
-                                "test name":      test_name if idx == 0 else None,
-                                "result unit":    new.get("result unit") if idx == 0 else None,
-                                "expected range": new.get("expected range") if idx == 0 else None,
-                                "pass":           end.get("pass") if idx == 0 else None,
-                                "x":               x_val,
-                                "y":               y_val,
+                                "test name": tname if i == 0 else None,
+                                "result unit": new.get("result unit") if i == 0 else None,
+                                "expected range": new.get("expected range") if i == 0 else None,
+                                "pass": end.get("pass") if i == 0 else None,
+                                "x": x_val,
+                                "y": y_val,
                             })
 
-                        # Write out with exactly these columns; Excel will show blanks for None
                         df = pd.DataFrame(rows, columns=[
-                            "test name",
-                            "result unit",
-                            "expected range",
-                            "pass",
-                            "x",
-                            "y",
+                            "test name", "result unit", "expected range", "pass", "x", "y"
                         ])
                         df.to_excel(writer, sheet_name=sheet, index=False)
+
                     elif rtype == "image":
-                        # 》 embed the image into the sheet 《
-                        # a) Write a small header with test name & pass/fail status
+                        # header row + embed the image found in the last image event
                         end_evt = next((e for e in evts if e["message type"] == "test end"), evts[-1])
-                        header_df = pd.DataFrame([{"test name": test_name, "result type": end_evt["result type"], "pass": end_evt["pass"]}])
+                        header_df = pd.DataFrame([{
+                            "test name": tname,
+                            "result type": end_evt.get("result type"),
+                            "pass": end_evt.get("pass"),
+                        }], columns=["test name", "result type", "pass"])
                         header_df.to_excel(writer, sheet_name=sheet, index=False)
-                        # b) Extract the image URL from the 'update' or 'test end' event
-                        last_img_url = next((e["result"] for e in evts if e["message type"] in ("update", "test end")), None)
-                        if last_img_url:
-                        # parse out just the filename (assumes format "http://host/images/filename")
-                            filename = os.path.basename(last_img_url)
-                            local_path = os.path.join("images", filename)
-                            if os.path.exists(local_path):
-                                ws = writer.book[sheet]
-                                img = XLImage(local_path)
-                                # place the image roughly below the header (e.g. at cell A3)
-                                ws.add_image(img, "A3")
+
+                        # Try to embed the image (expects a /images/... URL)
+                        img_url = next(
+                            (e.get("result") for e in evts if
+                             e.get("message type") in ("update", "test end") and e.get("result")),
+                            None
+                        )
+                        if img_url:
+                            # Map "/images/…/file" → local "images/…/file"
+                            local_path = None
+                            if "/images/" in str(img_url):
+                                local_path = os.path.join("images", str(img_url).split("/images/")[1])
+                            elif str(img_url).startswith("images" + os.sep) or str(img_url).startswith("images/"):
+                                local_path = str(img_url)
+
+                            ws = writer.book[sheet]
+                            if local_path and os.path.exists(local_path):
+                                ws.add_image(XLImage(local_path), "A3")
                             else:
-                                # if the file doesn't exist locally, write a note
-                                ws = writer.book[sheet]
-                                ws.cell(row=3, column=1,value=f"⚠︎ Image not found: {filename}")
+                                ws.cell(row=3, column=1, value=f"Image not found: {img_url}")
+
                     else:
-                        # fallback: dump raw events
+                        # Fallback: dump raw events for unknown types
                         pd.DataFrame(evts).to_excel(writer, sheet_name=sheet, index=False)
 
-        full_messages = pd.DataFrame(self.test_data)
-        full_messages.to_excel("full_log.xlsx", index=False)
+        # Optional rolling full log (for debugging)
+        pd.DataFrame(self.test_data).to_excel("full_log.xlsx", index=False)
 
     def parse_results(self, df_map, workbook):
         """
